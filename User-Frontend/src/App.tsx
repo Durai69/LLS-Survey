@@ -2,19 +2,20 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-// BrowserRouter is REMOVED from this import as it's in main.tsx
 import { Routes, Route, Navigate } from "react-router-dom"; 
-
-// AuthProvider is REMOVED from import as it's provided by main.tsx
-import { useAuth } from "@/contexts/AuthContext"; // Keep useAuth for ProtectedRoute logic
-
+import { useAuth } from "@/contexts/AuthContext"; 
 import { DepartmentsProvider } from "@/contexts/DepartmentContext"; 
 import { SurveyProvider } from "@/contexts/SurveyContext";
 
-// Pages
-import Login from "../../Shared/Login"; // This is your User-Frontend's Login
+// Import axios to configure it globally
+import axios from 'axios';
+import { useEffect } from 'react'; // Import useEffect
+
+
+
+import Login from "../../Shared/Login"; 
 import Dashboard from "./pages/Dashboard";
-import DepartmentSelection from "../src/pages/DepartmentSelection"; // Corrected path (verify local structure)
+import DepartmentSelection from "../src/pages/DepartmentSelection"; 
 import SurveyForm from "./pages/SurveyForm";
 import SubmissionSuccess from "./pages/SubmissionSuccess";
 import ExcelExport from "./pages/ExcelExport";
@@ -47,6 +48,13 @@ const ProtectedRoute = ({ children }: { children: JSX.Element }) => {
 
 
 const AppRoutes = () => {
+  // Configure Axios to send cookies with all requests
+  // This needs to be done once when the app starts.
+  useEffect(() => {
+    axios.defaults.withCredentials = true;
+    console.log("Axios withCredentials set to true globally.");
+  }, []); // Empty dependency array means this runs once on mount
+
   return (
     <Routes>
       {/* Public Routes */}

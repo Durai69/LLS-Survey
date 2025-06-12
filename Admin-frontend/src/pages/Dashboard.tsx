@@ -40,7 +40,7 @@ const Dashboard = () => {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
         <p className="text-muted-foreground">
-          Welcome to Insight Pulse Admin Dashboard
+          Welcome to Admin Dashboard
         </p>
       </div>
       

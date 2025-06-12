@@ -24,15 +24,23 @@
         const [loading, setLoading] = useState(true);
         const [error, setError] = useState<string | null>(null);
 
+        // --- NEW: Configure Axios to send cookies for this context's requests ---
+        useEffect(() => {
+            axios.defaults.withCredentials = true;
+            console.log("DepartmentsContext: Axios withCredentials set to true.");
+        }, []);
+        // -----------------------------------------------------------------------
+
         const fetchDepartments = async () => {
             setLoading(true);
             setError(null);
             try {
-                const response = await axios.get<Department[]>(`${API_BASE_URL}/departments`);
+                // Ensure this specific request (and all others using axios) send credentials
+                const response = await axios.get<Department[]>(`${API_BASE_URL}/departments`); 
                 setDepartments(response.data);
-            } catch (err) {
+            } catch (err: any) { // Type 'any' for error to access `response.data`
                 console.error("Failed to fetch departments:", err);
-                setError("Failed to load departments. Please ensure the backend is running and department data is populated.");
+                setError(err.response?.data?.message || "Failed to load departments. Please ensure the backend is running and department data is populated.");
             } finally {
                 setLoading(false);
             }
@@ -60,4 +68,3 @@
         }
         return context;
     };
-    

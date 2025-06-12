@@ -7,8 +7,8 @@ from models import Survey, Question, Option, SurveySubmission, Answer, RemarkRes
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy.exc import IntegrityError, NoResultFound
 from datetime import datetime, timedelta
-import pandas as pd # For Excel export
-import io # For handling file in memory
+import pandas as pd
+import io
 
 survey_bp = Blueprint('survey', __name__, url_prefix='/api')
 
@@ -60,7 +60,7 @@ def serialize_submission_detailed(submission: SurveySubmission):
 
 # Endpoint to get all active surveys (e.g., for Department Selection)
 @survey_bp.route('/surveys', methods=['GET'])
-@jwt_required()
+# @jwt_required() # <-- COMMENTED OUT FOR DEVELOPMENT TO ALLOW PUBLIC ACCESS IF NEEDED BY FRONTEND BEFORE LOGIN
 def get_surveys():
     db: Session = SessionLocal()
     try:
@@ -74,7 +74,7 @@ def get_surveys():
 
 # Endpoint to get a specific survey by ID with its questions
 @survey_bp.route('/surveys/<int:survey_id>', methods=['GET'])
-@jwt_required()
+# @jwt_required() # <-- COMMENTED OUT FOR DEVELOPMENT TO ALLOW PUBLIC ACCESS IF NEEDED BY FRONTEND BEFORE LOGIN
 def get_survey_by_id(survey_id: int):
     db: Session = SessionLocal()
     try:
@@ -92,14 +92,13 @@ def get_survey_by_id(survey_id: int):
         db.close()
 
 # Endpoint to submit survey responses (ADAPTED FROM TEAMMATE'S '/submit-survey')
-@survey_bp.route('/submit-survey', methods=['POST']) # Renamed for clarity and potential original frontend use
-@jwt_required()
+@survey_bp.route('/submit-survey', methods=['POST'])
+@jwt_required() # This must remain protected
 def submit_survey():
     db: Session = SessionLocal()
     try:
         data = request.get_json()
 
-        # Input validation matching teammate's payload structure
         required_fields = [
             'department_id', 'department_name', 'submitter_department_id', 'submitted_by',
             'date', 'questions_data', 'summary_metrics'
@@ -116,7 +115,6 @@ def submit_survey():
         except ValueError:
             return jsonify({"error": "overall_customer_rating in summary_metrics must be a number."}), 400
 
-        # Resolve department IDs from names or incoming IDs
         rated_department = db.query(Department).filter(Department.id == data['department_id']).first()
         if not rated_department:
              return jsonify({"error": f"Rated Department with ID '{data['department_id']}' not found."}), 400
@@ -129,39 +127,26 @@ def submit_survey():
         if not submitter_user:
             return jsonify({"error": f"Submitter user '{data['submitted_by']}' not found."}), 400
 
-        # Assuming 'date' is YYYY-MM-DD or similar
         submitted_at = datetime.strptime(data['date'], '%Y-%m-%d') if isinstance(data['date'], str) else datetime.utcnow()
 
-        # Find the actual Survey template based on the rated_department_id.
-        # This assumes there's a unique survey per rated_department or a primary one.
-        # For simplicity, let's try to find a survey related to this rated department.
-        # You might need to add a "survey_title" or "survey_id" to the incoming payload
-        # if there are multiple survey templates for the same department.
-        # For now, let's just pick one or assume a default if no survey ID is passed.
-        # If the frontend is giving department_id, it implicitly expects a survey for that.
         survey_template = db.query(Survey).filter(
             Survey.rated_department_id == rated_department.id
         ).first()
 
         if not survey_template:
-            # If no specific survey template found for the rated department,
-            # you might create a default one or return an error.
-            # For now, let's return an error.
             return jsonify({"error": f"No survey template found for rated department ID: {rated_department.id}"}), 400
 
 
-        # Check if user has already submitted this specific survey template
         existing_submission = db.query(SurveySubmission).filter(
             SurveySubmission.survey_id == survey_template.id,
             SurveySubmission.submitter_user_id == submitter_user.id
         ).first()
 
         if existing_submission:
-            return jsonify({"detail": "You have already submitted this survey."}), 409 # Conflict
+            return jsonify({"detail": "You have already submitted this survey."}), 409
 
-        # Create new submission
         new_submission = SurveySubmission(
-            survey_id=survey_template.id, # Link to the actual survey template
+            survey_id=survey_template.id,
             submitter_user_id=submitter_user.id,
             submitter_department_id=submitter_department.id,
             rated_department_id=rated_department.id,
@@ -171,18 +156,13 @@ def submit_survey():
             suggestions=summary_metrics.get('suggestions')
         )
         db.add(new_submission)
-        db.flush() # Flush to get the new_submission.id without committing yet
+        db.flush()
 
-        # Process answers from 'questions_data'
         for q_data in data.get('questions_data', []):
-            question_id_from_payload = q_data.get('id') # This could be their MongoDB _id string or our SQL int ID
+            question_id_from_payload = q_data.get('id')
             question_text = q_data.get('question')
             question_category = q_data.get('category')
             
-            # Try to find the question in our DB. If not found, create a placeholder or error.
-            # Ideally, questions should come from a pre-defined survey template.
-            # For robust mapping, you might need to map based on question text or a canonical ID.
-            # For now, let's try to find by ID if it's an integer, or by text within the survey.
             question_obj = None
             if isinstance(question_id_from_payload, int):
                 question_obj = db.query(Question).filter(
@@ -190,7 +170,7 @@ def submit_survey():
                     Question.survey_id == survey_template.id
                 ).first()
             
-            if not question_obj and question_text: # Fallback to finding by text if ID isn't found/provided correctly
+            if not question_obj and question_text:
                 question_obj = db.query(Question).filter(
                     Question.text == question_text,
                     Question.survey_id == survey_template.id
@@ -198,14 +178,13 @@ def submit_survey():
 
             if not question_obj:
                 print(f"Warning: Question '{question_text}' (ID: {question_id_from_payload}) not found in template {survey_template.id}. Skipping answer.")
-                continue # Skip this answer if question cannot be mapped
+                continue
 
             new_answer = Answer(
                 submission_id=new_submission.id,
                 question_id=question_obj.id,
                 rating_value=q_data.get('rating'),
                 text_response=q_data.get('remarks'),
-                # selected_option_id would need further mapping if multiple_choice questions are used
             )
             db.add(new_answer)
         
@@ -229,7 +208,7 @@ def submit_survey():
 
 # Endpoint to fetch incoming remarks for a department
 @survey_bp.route('/remarks/incoming', methods=['GET'])
-@jwt_required()
+@jwt_required() # This must remain protected as it fetches user-specific data
 def get_incoming_remarks():
     db: Session = SessionLocal()
     try:
@@ -256,8 +235,7 @@ def get_incoming_remarks():
 
         for submission in submissions:
             for answer in submission.answers:
-                if answer.text_response: # Check if there is a remark
-                    # Check if a response for this specific answer/question already exists
+                if answer.text_response:
                     remark_response_exists = db.query(RemarkResponse).filter(
                         RemarkResponse.survey_submission_id == submission.id,
                         RemarkResponse.question_id == answer.question_id
@@ -286,7 +264,7 @@ def get_incoming_remarks():
 
 # Endpoint to fetch outgoing remarks for a department
 @survey_bp.route('/remarks/outgoing', methods=['GET'])
-@jwt_required()
+@jwt_required() # This must remain protected as it fetches user-specific data
 def get_outgoing_remarks():
     db: Session = SessionLocal()
     try:
@@ -316,7 +294,7 @@ def get_outgoing_remarks():
             submission_date_str = submission.submitted_at.strftime('%Y-%m-%d %H:%M:%S') if submission.submitted_at else None
 
             for answer in submission.answers:
-                if answer.text_response: # If user provided a remark/comment for this question
+                if answer.text_response:
                     
                     their_response = {
                         "explanation": "",
@@ -356,7 +334,7 @@ def get_outgoing_remarks():
 
 # Endpoint to submit a response to an incoming remark
 @survey_bp.route('/remarks/respond', methods=['POST'])
-@jwt_required()
+@jwt_required() # This must remain protected
 def respond_to_remark():
     db: Session = SessionLocal()
     try:
@@ -424,14 +402,13 @@ def respond_to_remark():
 
 # Endpoint to fetch department-specific dashboard metrics
 @survey_bp.route('/department-dashboard-metrics', methods=['GET'])
-@jwt_required()
+@jwt_required() # This must remain protected as it fetches sensitive aggregated data
 def get_department_dashboard_metrics():
     db: Session = SessionLocal()
     try:
         all_departments = db.query(Department).all()
         all_departments_map = {dept.id: dept.name for dept in all_departments}
 
-        # Calculate aggregated metrics for departments that have received surveys
         department_metrics_from_submissions = db.query(
             SurveySubmission.rated_department_id,
             func.avg(SurveySubmission.overall_customer_rating).label('average_rating'),
@@ -446,7 +423,6 @@ def get_department_dashboard_metrics():
             for metric in department_metrics_from_submissions
         }
 
-        # Calculate unresponded remarks count per department
         unresponded_counts_map = {}
         for dept in all_departments:
             remark_answers_for_dept = db.query(Answer).join(SurveySubmission).filter(
@@ -489,10 +465,10 @@ def get_department_dashboard_metrics():
         db.close()
 
 
-# Endpoint to get stored survey results for dashboard overview (ADAPTED FROM TEAMMATE'S '/stored-survey-results')
+# Endpoint to get stored survey results for dashboard overview
 @survey_bp.route('/stored-survey-results', methods=['GET'])
-@jwt_required()
-def get_stored_survey_results_dashboard(): # Renamed to avoid confusion with export endpoint
+@jwt_required() # This must remain protected as it fetches sensitive data
+def get_stored_survey_results_dashboard():
     db: Session = SessionLocal()
     try:
         recent_submissions = db.query(SurveySubmission).options(
@@ -502,13 +478,11 @@ def get_stored_survey_results_dashboard(): # Renamed to avoid confusion with exp
 
         results = []
         for sub in recent_submissions:
-            # Match teammate's output format: "id", "departmentId", "submissionDate", "overallRating"
             results.append({
-                "id": sub.id, # No need for str(ObjectId) since it's an int ID now
+                "id": sub.id,
                 "departmentId": sub.rated_department_id,
-                "submissionDate": sub.submitted_at.strftime('%Y-%m-%d') if sub.submitted_at else 'N/A', # Format date as YYYY-MM-DD
+                "submissionDate": sub.submitted_at.strftime('%Y-%m-%d') if sub.submitted_at else 'N/A',
                 "overallRating": float(sub.overall_customer_rating) if sub.overall_customer_rating is not None else 0.0,
-                # Add other fields if needed by frontend for card display
                 "departmentName": sub.rated_department.name if sub.rated_department else 'N/A',
                 "submitterUsername": sub.submitter.username if sub.submitter else 'N/A'
             })
@@ -520,9 +494,9 @@ def get_stored_survey_results_dashboard(): # Renamed to avoid confusion with exp
         db.close()
 
 
-# Endpoint to get global survey summaries (NEW, BASED ON TEAMMATE'S '/submitted-survey-summaries')
+# Endpoint to get global survey summaries
 @survey_bp.route('/submitted-survey-summaries', methods=['GET'])
-@jwt_required()
+@jwt_required() # This must remain protected as it fetches sensitive aggregated data
 def get_global_survey_summaries():
     db: Session = SessionLocal()
     try:
@@ -533,12 +507,11 @@ def get_global_survey_summaries():
         ).scalar()
         average_overall_rating = round(average_rating_result, 2) if average_rating_result is not None else 0.0
 
-        # total_percentage logic (assuming max rating is 100)
         total_percentage = (average_overall_rating / 100.0) * 100 if average_overall_rating is not None else 0.0
 
         latest_submissions = []
         recent_subs_query = db.query(SurveySubmission).options(
-            joinedload(SurveySubmission.rated_department) # Load department for name if needed
+            joinedload(SurveySubmission.rated_department)
         ).order_by(SurveySubmission.submitted_at.desc()).limit(5).all()
 
         for sub in recent_subs_query:
@@ -547,7 +520,7 @@ def get_global_survey_summaries():
                 "departmentId": sub.rated_department_id,
                 "overallRating": float(sub.overall_customer_rating) if sub.overall_customer_rating is not None else 0.0,
                 "submissionDate": sub.submitted_at.strftime('%Y-%m-%d') if sub.submitted_at else 'N/A',
-                "departmentName": sub.rated_department.name if sub.rated_department else 'N/A' # Add department name
+                "departmentName": sub.rated_department.name if sub.rated_department else 'N/A'
             })
 
         summary_data = {
@@ -564,101 +537,9 @@ def get_global_survey_summaries():
         db.close()
 
 
-# Endpoint to get all stored survey results (for Excel export data source or full view)
-# This was previously '/stored-survey-results'
-@survey_bp.route('/export-data', methods=['GET']) # Renamed to avoid clash with dashboard overview route
-@jwt_required()
-def get_stored_survey_results_for_export(): # Renamed function
-    db: Session = SessionLocal()
-    try:
-        time_period = request.args.get('timePeriod', 'all_time')
-        start_date = None
-        current_date = datetime.utcnow().date()
-
-        if time_period == "last_30_days":
-            start_date = current_date - timedelta(days=30)
-        elif time_period == "last_3_months":
-            start_date = current_date - timedelta(days=90)
-        elif time_period == "last_6_months":
-            start_date = current_date - timedelta(days=180)
-        elif time_period == "last_year":
-            start_date = current_date - timedelta(days=365)
-        
-        query = db.query(SurveySubmission).options(
-            joinedload(SurveySubmission.survey).joinedload(Survey.questions).joinedload(Question.options),
-            joinedload(SurveySubmission.answers).joinedload(Answer.question),
-            joinedload(SurveySubmission.answers).joinedload(Answer.selected_option),
-            joinedload(SurveySubmission.submitter),
-            joinedload(SurveySubmission.submitter_department),
-            joinedload(SurveySubmission.rated_department),
-            joinedload(SurveySubmission.remark_responses).joinedload(RemarkResponse.responded_by_department)
-        )
-
-        if start_date:
-            query = query.filter(SurveySubmission.submitted_at >= start_date)
-
-        submissions = query.order_by(SurveySubmission.submitted_at.desc()).all()
-        
-        results_data = []
-        for submission in submissions:
-            submission_data = {
-                "id": submission.id,
-                "survey_id": submission.survey_id,
-                "title": submission.survey.title if submission.survey else "N/A",
-                "submitted_by_user": submission.submitter.username if submission.submitter else "N/A",
-                "submitter_user_name": submission.submitter.name if submission.submitter else "N/A",
-                "submitter_department_id": submission.submitter_department_id,
-                "submitter_department_name": submission.submitter_department.name if submission.submitter_department else "N/A",
-                "rated_department_id": submission.rated_department_id,
-                "rated_department_name": submission.rated_department.name if submission.rated_department else "N/A",
-                "submitted_at": submission.submitted_at.isoformat() if submission.submitted_at else None,
-                "overall_customer_rating": float(submission.overall_customer_rating) if submission.overall_customer_rating is not None else None,
-                "rating_description": submission.rating_description,
-                "suggestions": submission.suggestions,
-                "questions_data": [],
-                "remark_responses": []
-            }
-
-            for answer in submission.answers:
-                question = answer.question
-                if question:
-                    answer_item = {
-                        "question_id": question.id,
-                        "question_text": question.text,
-                        "question_type": question.type,
-                        "category": question.category,
-                        "rating": answer.rating_value,
-                        "remarks": answer.text_response,
-                        "selected_option_text": answer.selected_option.text if answer.selected_option else None,
-                        "selected_option_value": answer.selected_option.value if answer.selected_option else None,
-                    }
-                    submission_data["questions_data"].append(answer_item)
-
-            for r_response in submission.remark_responses:
-                remark_response_item = {
-                    "question_id": r_response.question_id,
-                    "explanation": r_response.explanation,
-                    "action_plan": r_response.action_plan,
-                    "responsible_person": r_response.responsible_person,
-                    "responded_at": r_response.responded_at.isoformat() if r_response.responded_at else None,
-                    "responded_by_department_id": r_response.responded_by_department_id,
-                    "responded_by_department_name": r_response.responded_by_department.name if r_response.responded_by_department else 'N/A'
-                }
-                submission_data["remark_responses"].append(remark_response_item)
-
-            results_data.append(submission_data)
-        
-        return jsonify(results_data), 200
-    except Exception as e:
-        print(f"Error fetching stored survey results for export: {e}")
-        return jsonify({"detail": f"Error fetching stored survey results for export: {str(e)}"}), 500
-    finally:
-        db.close()
-
-
-# Endpoint to export data to Excel (UNCHANGED, but ensuring it uses SQLAlchemy data)
+# Endpoint to export data to Excel
 @survey_bp.route('/export', methods=['GET'])
-@jwt_required()
+@jwt_required() # This must remain protected as it handles sensitive data export
 def export_excel():
     db: Session = SessionLocal()
     output = io.BytesIO()
@@ -684,9 +565,9 @@ def export_excel():
             start_date = current_date - timedelta(days=180)
         elif time_period == "last_year":
             start_date = current_date - timedelta(days=365)
-
+        
         query = db.query(SurveySubmission).options(
-            joinedload(SurveySubmission.survey),
+            joinedload(SurveySubmission.survey).joinedload(Survey.questions).joinedload(Question.options),
             joinedload(SurveySubmission.answers).joinedload(Answer.question),
             joinedload(SurveySubmission.answers).joinedload(Answer.selected_option),
             joinedload(SurveySubmission.submitter),
@@ -697,7 +578,7 @@ def export_excel():
 
         if start_date:
             query = query.filter(SurveySubmission.submitted_at >= start_date)
-        
+
         all_submissions = query.order_by(SurveySubmission.submitted_at.desc()).all()
 
         df_data = []

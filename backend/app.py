@@ -1,14 +1,19 @@
 # F:\LLS Survey\backend\app.py
 from dotenv import load_dotenv
-load_dotenv() # Ensure this is at the very top, before other imports that might depend on env vars
+load_dotenv()
 
 from flask import Flask, request, jsonify, make_response, url_for
 from flask_cors import CORS
 from sqlalchemy.orm import Session
-from flask_jwt_extended import create_access_token, JWTManager, jwt_required, get_jwt_identity, unset_jwt_cookies, set_access_cookies
+from flask_jwt_extended import create_access_token, JWTManager, jwt_required, get_jwt_identity, unset_jwt_cookies, set_access_cookies, decode_token
 from datetime import timedelta
 import os
 import secrets
+import logging # Import logging module
+
+# Configure logging to show info messages
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 from security import verify_password, get_frontend_role, hash_password
 from database import SessionLocal
@@ -20,7 +25,6 @@ from routes.survey_routes import survey_bp
 
 app = Flask(__name__)
 
-# --- Flask's Native SECRET_KEY (Good practice to set this too) ---
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "another_super_secret_key_for_flask_CHANGE_THIS")
 
 # --- Flask-JWT-Extended Configuration ---
@@ -28,19 +32,24 @@ app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "your_super_secret_jw
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=1)
 app.config["JWT_TOKEN_LOCATION"] = ["cookies"]
 app.config["JWT_COOKIE_SECURE"] = False # Set to True in production for HTTPS
-app.config["JWT_COOKIE_CSRF_PROTECT"] = True # Enable CSRF protection for cookies
+app.config["JWT_COOKIE_CSRF_PROTECT"] = False # Temporarily False for development!
+app.config["JWT_ACCESS_TOKEN_NAME"] = 'access_token_cookie' # Explicitly name the access token cookie
+app.config["JWT_COOKIE_DOMAIN"] = 'localhost' # Explicitly set domain for development
+app.config["JWT_COOKIE_PATH"] = '/' # Ensure cookie is available to all paths
+
 jwt = JWTManager(app)
 # --- END JWT Configuration ---
 
-# DIAGNOSTIC PRINT: Check what JWT_SECRET_KEY is being used
 print(f"DEBUG: app.config['JWT_SECRET_KEY'] is set to: {'***KEY_IS_SET***' if app.config['JWT_SECRET_KEY'] else '!!!KEY_IS_NOT_SET!!!'}")
+print(f"DEBUG: JWT_COOKIE_CSRF_PROTECT is: {app.config['JWT_COOKIE_CSRF_PROTECT']}")
+print(f"DEBUG: JWT_ACCESS_TOKEN_NAME is: {app.config['JWT_ACCESS_TOKEN_NAME']}")
+print(f"DEBUG: JWT_COOKIE_DOMAIN is: {app.config['JWT_COOKIE_DOMAIN']}")
+print(f"DEBUG: JWT_COOKIE_PATH is: {app.config['JWT_COOKIE_PATH']}")
 
 
-# Configure CORS - CRUCIAL for your two frontends to exchange cookies
 CORS(app, resources={r"/*": {"origins": ["http://localhost:8080", "http://localhost:8081", "http://localhost:5173"]}}, supports_credentials=True)
 
 
-# Dependency to get DB session
 def get_db():
     db = SessionLocal()
     try:
@@ -56,31 +65,35 @@ def login():
     username = request.json.get("username", None)
     password = request.json.get("password", None)
 
+    # Added debug print for username
+    logger.info(f"Login attempt for username: {username}") 
+
     user = db.query(User).filter(User.username == username).first()
 
     if user and verify_password(password, user.hashed_password):
-        # Create user data dictionary to return, normalizing role
         user_data = {
             "id": user.id,
             "username": user.username,
             "name": user.name,
             "email": user.email,
-            "department": user.department, # This is the department name (string)
-            "role": get_frontend_role(user.role), # Normalized role for frontend
+            "department": user.department,
+            "role": get_frontend_role(user.role),
             "is_active": user.is_active
         }
 
-        # Create the access token
         access_token = create_access_token(identity=user.username)
         
-        # Set the JWT cookie in the response
         response = make_response(jsonify({
             "message": "Login successful",
-            "user": user_data, # Return the full user object
+            "user": user_data,
         }), 200)
+        
+        # Set the access token cookie
         set_access_cookies(response, access_token)
+        logger.info(f"Login successful for {username}. Access cookie set.")
         return response
     else:
+        logger.warning(f"Login failed for username: {username}. Invalid credentials.")
         return jsonify({"detail": "Invalid credentials"}), 401
 
 @app.route("/logout", methods=["POST"])
@@ -88,13 +101,14 @@ def login():
 def logout():
     response = make_response(jsonify({"message": "Successfully logged out"}), 200)
     unset_jwt_cookies(response)
+    logger.info(f"User {get_jwt_identity()} logged out. Access cookie unset.")
     return response
 
 @app.route("/verify_auth", methods=["GET"])
 @jwt_required(optional=True)
 def verify_auth():
     db: Session = next(get_db())
-    current_username = get_jwt_identity()
+    current_username = get_jwt_identity() # This will be None if no valid token
 
     if current_username:
         user = db.query(User).filter(User.username == current_username).first()
@@ -108,17 +122,20 @@ def verify_auth():
                 "role": get_frontend_role(user.role),
                 "is_active": user.is_active
             }
+            logger.info(f"Verify Auth: User {current_username} authenticated.")
             return jsonify({
                 "isAuthenticated": True,
                 "message": "Authenticated",
                 "user": user_data
             }), 200
         else:
+            logger.warning(f"Verify Auth: User {current_username} from token not found in DB.")
             return jsonify({
                 "isAuthenticated": False,
                 "message": "User associated with token not found"
             }), 401
     else:
+        logger.info("Verify Auth: No valid token or token expired/invalid. Not authenticated.")
         return jsonify({
             "isAuthenticated": False,
             "message": "Not authenticated or session expired"
@@ -155,6 +172,6 @@ app.register_blueprint(survey_bp)
 
 # --- Application Entry Point ---
 if __name__ == '__main__':
-    print(f"Flask app running on http://127.0.0.1:5000")
+    logger.info(f"Flask app running on http://127.0.0.1:5000")
     app.run(debug=True, port=5000, host='0.0.0.0')
 
