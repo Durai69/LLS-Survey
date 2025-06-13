@@ -1,11 +1,16 @@
-    // src/contexts/DepartmentsContext.tsx
-    import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+    import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
     import axios from 'axios';
 
-    // Ensure this matches your Flask backend URL
-    const API_BASE_URL = 'http://localhost:5000/api'; 
+    // IMPORTANT: WITH /api prefix here, as these routes are part of a blueprint
+    const API_BASE_URL = 'http://127.0.0.1:5000/api'; 
 
-    interface Department {
+    // Configure Axios instance to always send cookies
+    const axiosInstance = axios.create({
+      baseURL: API_BASE_URL,
+      withCredentials: true,
+    });
+
+    export interface Department {
         id: number;
         name: string;
     }
@@ -14,7 +19,7 @@
         departments: Department[];
         loading: boolean;
         error: string | null;
-        refreshDepartments: () => void; 
+        refreshDepartments: () => void;
     }
 
     const DepartmentsContext = createContext<DepartmentsContextType | undefined>(undefined);
@@ -24,23 +29,23 @@
         const [loading, setLoading] = useState(true);
         const [error, setError] = useState<string | null>(null);
 
-        const fetchDepartments = async () => {
+        const fetchDepartments = useCallback(async () => {
             setLoading(true);
             setError(null);
             try {
-                const response = await axios.get<Department[]>(`${API_BASE_URL}/departments`);
+                const response = await axiosInstance.get<Department[]>('/departments'); 
                 setDepartments(response.data);
-            } catch (err) {
+            } catch (err: any) {
                 console.error("Failed to fetch departments:", err);
-                setError("Failed to load departments. Please ensure the backend is running and department data is populated.");
+                setError(err.response?.data?.detail || "Failed to load departments. Please ensure the backend is running and department data is populated.");
             } finally {
                 setLoading(false);
             }
-        };
+        }, []);
 
         useEffect(() => {
             fetchDepartments();
-        }, []);
+        }, [fetchDepartments]);
 
         const refreshDepartments = () => {
             fetchDepartments();
@@ -60,4 +65,3 @@
         }
         return context;
     };
-    

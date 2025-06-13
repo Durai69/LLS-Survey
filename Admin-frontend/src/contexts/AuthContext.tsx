@@ -1,18 +1,20 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useToast } from '@/components/ui/use-toast'; // Correct path to useToast
+import { useToast } from '@/components/ui/use-toast';
 
+// IMPORTANT: NO /api prefix here, as these routes are on the root app
 const API_BASE_URL = 'http://127.0.0.1:5000';
+
 const AUTH_LOCAL_STORAGE_KEY = 'insightPulseUser';
 
 export interface User {
-  id: number; // Ensure this is present and correctly typed
+  id: number; 
   username: string;
-  name: string; // Ensure 'name' is explicitly a string
+  name: string;
   email: string;
   department: string;
   role: string;
-  is_active: boolean; // Ensure this is present and correctly typed
+  is_active: boolean; 
 }
 
 interface AuthContextType {
@@ -20,7 +22,7 @@ interface AuthContextType {
   login: (username: string, password: string) => Promise<User | null>;
   logout: () => void;
   isAuthenticated: boolean;
-  isLoading: boolean; // Add isLoading to context type
+  isLoading: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -28,73 +30,43 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [isLoading, setIsLoading] = useState<boolean>(true); // Initialize isLoading
+  const [isLoading, setIsLoading] = useState<boolean>(true);
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  // Function to refresh authentication status (from local storage and backend)
   const refreshAuth = async () => {
     setIsLoading(true);
     try {
       console.log("Attempting to verify authentication status...");
-      
-      // First, try to load from local storage
-      const storedUser = localStorage.getItem(AUTH_LOCAL_STORAGE_KEY);
-      if (storedUser) {
-        try {
-          const parsedUser: User = JSON.parse(storedUser);
-          // Basic validation for essential user properties before setting state
-          if (parsedUser && parsedUser.id !== undefined && parsedUser.username && parsedUser.role && typeof parsedUser.is_active === 'boolean') {
-            setUser(parsedUser);
-            setIsAuthenticated(true);
-            console.log("User data restored from local storage:", parsedUser.username);
-          } else {
-            console.warn("Invalid user data found in local storage. Clearing...");
-            localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
-          }
-        } catch (e) {
-          console.error("Failed to parse user from local storage, clearing:", e);
-          localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
-        }
-      }
-
-      // Then, verify with backend for token validity (even if loaded from local storage)
       const response = await fetch(`${API_BASE_URL}/verify_auth`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
         },
-        credentials: 'include', // Important for sending JWT cookie
+        credentials: 'include', // IMPORTANT: Include cookies with the request
       });
 
       if (response.ok) {
         const data = await response.json();
-        console.log("Verify Auth Response Data (from backend):", data); 
-        // Backend's /verify_auth also returns a nested 'user' object
-        if (data.isAuthenticated && data.user && data.user.id !== undefined && data.user.username && data.user.role && typeof data.user.is_active === 'boolean') {
+        if (data.isAuthenticated) {
           setUser(data.user);
           setIsAuthenticated(true);
-          localStorage.setItem(AUTH_LOCAL_STORAGE_KEY, JSON.stringify(data.user)); // Update local storage with fresh data
+          localStorage.setItem(AUTH_LOCAL_STORAGE_KEY, JSON.stringify(data.user));
+          console.log("Authentication refreshed: User is authenticated.");
         } else {
-          console.warn("Verify Auth: Invalid user data from backend or not authenticated. Clearing session.", data);
           setUser(null);
           setIsAuthenticated(false);
           localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
+          console.log("Authentication refreshed: User is NOT authenticated.");
         }
       } else {
-        // This is expected if no valid token is present (e.g., initial load, token expired)
-        console.log(`Verify Auth failed with status ${response.status}. Session cleared.`);
+        console.warn("Auth verification response not OK:", response.status, await response.json());
         setUser(null);
         setIsAuthenticated(false);
         localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
       }
     } catch (error) {
-      console.error('Error during verify_auth fetch:', error);
-      toast({
-        title: "Authentication Check Failed",
-        description: "Could not connect to the authentication server.",
-        variant: "destructive",
-      });
+      console.error("Error during authentication refresh:", error);
       setUser(null);
       setIsAuthenticated(false);
       localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
@@ -103,77 +75,79 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
-  // Run refreshAuth on component mount
+  // Initial check on mount
   useEffect(() => {
-    refreshAuth();
-  }, []);
+    const storedUser = localStorage.getItem(AUTH_LOCAL_STORAGE_KEY);
+    if (storedUser) {
+      try {
+        setUser(JSON.parse(storedUser));
+        setIsAuthenticated(true);
+        refreshAuth(); 
+      } catch (e) {
+        console.error("Failed to parse stored user data:", e);
+        localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
+        refreshAuth(); // Fetch fresh state if stored data is invalid
+      }
+    } else {
+      refreshAuth(); // Always verify with backend, even if no stored user
+    }
+  }, []); 
 
-  const login = async (username: string, password: string): Promise<User | null> => {
+
+  const login = async (usernameInput: string, passwordInput: string): Promise<User | null> => {
+    setIsLoading(true);
     try {
-      console.log("Attempting login for username:", username);
-      const response = await fetch(`${API_BASE_URL}/login`, {
+      const response = await fetch(`${API_BASE_URL}/login`, { // Uses API_BASE_URL without /api
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-        credentials: 'include', // Important for sending/receiving JWT cookie
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ username: usernameInput, password: passwordInput }),
+        credentials: 'include', 
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        toast({
-          title: "Login failed",
-          description: errorData.detail || "Invalid username or password",
-          variant: "destructive",
-        });
-        console.error("Login API returned non-OK status:", response.status, errorData);
-        return null;
-      }
+      const data = await response.json();
 
-      const responseJson = await response.json(); 
-      console.log("Login successful full response data from backend:", responseJson); 
-
-      // CRITICAL FIX: Extract the nested 'user' object
-      const userData: User = responseJson.user; 
-
-      // Validate essential properties of the extracted user data
-      if (userData && userData.id !== undefined && userData.username && userData.role && typeof userData.is_active === 'boolean') {
-        setUser(userData);
+      if (response.ok) {
+        const loggedInUser: User = data.user;
+        setUser(loggedInUser);
         setIsAuthenticated(true);
-        // Store the *extracted user data* in local storage
-        localStorage.setItem(AUTH_LOCAL_STORAGE_KEY, JSON.stringify(userData)); 
-
+        localStorage.setItem(AUTH_LOCAL_STORAGE_KEY, JSON.stringify(loggedInUser));
         toast({
-          title: "Login successful",
-          description: `Welcome back, ${userData.name || userData.username}`, // Use name, fallback to username
-          variant: "default", 
+          title: "Login Successful",
+          description: `Welcome, ${loggedInUser.name}!`,
         });
-
-        return userData;
+        navigate('/dashboard'); 
+        return loggedInUser;
       } else {
         toast({
-          title: "Login failed",
-          description: "Invalid user data received from server. Missing ID, username, role, or active status.",
+          title: "Login Failed",
+          description: data.detail || "Invalid username or password.",
           variant: "destructive",
         });
-        console.error("Login: Invalid user data structure after successful fetch and parsing:", userData);
+        setUser(null);
+        setIsAuthenticated(false);
+        localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
         return null;
       }
-
     } catch (error) {
-      console.error('Login fetch error:', error);
+      console.error('Login request failed:', error);
       toast({
         title: "Login failed",
         description: "Unable to connect to the server or unexpected network error.",
         variant: "destructive",
       });
       return null;
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const logout = async () => {
+    setIsLoading(true); 
     try {
         console.log("Attempting logout...");
-        const response = await fetch(`${API_BASE_URL}/logout`, {
+        const response = await fetch(`${API_BASE_URL}/logout`, { // Uses API_BASE_URL without /api
             method: 'POST',
             credentials: 'include', 
         });
@@ -185,6 +159,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         }
     } catch (error) {
         console.error("Error during logout request:", error);
+        toast({
+            title: "Network Error",
+            description: "An error occurred during logout. Please try again.",
+            variant: "destructive",
+        });
     } finally {
         setUser(null);
         setIsAuthenticated(false);
@@ -195,6 +174,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             variant: "default", 
         });
         navigate('/login');
+        setIsLoading(false);
     }
   };
 

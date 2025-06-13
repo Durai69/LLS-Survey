@@ -41,112 +41,121 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         headers: {
           'Content-Type': 'application/json',
         },
-        credentials: 'include',
+        credentials: 'include', // <--- IMPORTANT: Include cookies with the request
       });
 
       if (response.ok) {
         const data = await response.json();
-        console.log("Verify Auth Response Data:", data); 
-        if (data.isAuthenticated && data.user && data.user.id !== undefined && data.user.username && data.user.role && typeof data.user.is_active === 'boolean') {
+        if (data.isAuthenticated) {
           setUser(data.user);
           setIsAuthenticated(true);
           localStorage.setItem(AUTH_LOCAL_STORAGE_KEY, JSON.stringify(data.user));
+          console.log("Authentication refreshed: User is authenticated.");
         } else {
-          console.warn("Verify Auth: Invalid user data or not authenticated.", data);
           setUser(null);
           setIsAuthenticated(false);
           localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
+          console.log("Authentication refreshed: User is NOT authenticated.");
         }
       } else {
-        console.log(`Verify Auth failed with status ${response.status}. Expected for non-logged in state or expired token.`);
+        // Handle cases where response is not ok but not necessarily an error that stops the app
+        console.warn("Auth verification response not OK:", response.status, await response.json());
         setUser(null);
         setIsAuthenticated(false);
         localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
       }
     } catch (error) {
-      console.error('Error during verify_auth fetch:', error);
-      toast({
-        title: "Authentication Check Failed",
-        description: "Could not connect to the authentication server.",
-        variant: "destructive",
-      });
+      console.error("Error during authentication refresh:", error);
       setUser(null);
       setIsAuthenticated(false);
       localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
+      // Optional: show a toast only if it's a critical network error, not just 401 on initial load
+      // toast({
+      //   title: "Network Error",
+      //   description: "Could not connect to authentication server.",
+      //   variant: "destructive",
+      // });
     } finally {
       setIsLoading(false);
     }
   };
 
+  // Initial check on mount
   useEffect(() => {
-    refreshAuth();
-  }, []);
+    const storedUser = localStorage.getItem(AUTH_LOCAL_STORAGE_KEY);
+    if (storedUser) {
+      try {
+        setUser(JSON.parse(storedUser));
+        setIsAuthenticated(true);
+        // Still call refreshAuth to validate the token with the backend
+        refreshAuth(); 
+      } catch (e) {
+        console.error("Failed to parse stored user data:", e);
+        localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
+        refreshAuth(); // Fetch fresh state if stored data is invalid
+      }
+    } else {
+      refreshAuth(); // Always verify with backend, even if no stored user
+    }
+  }, []); // Run only once on component mount
 
-  const login = async (username: string, password: string): Promise<User | null> => {
+
+  const login = async (usernameInput: string, passwordInput: string): Promise<User | null> => {
+    setIsLoading(true);
     try {
-      console.log("Attempting login for username:", username);
       const response = await fetch(`${API_BASE_URL}/login`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ username: usernameInput, password: passwordInput }),
+        credentials: 'include', // <--- IMPORTANT: Include cookies with the request
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        toast({
-          title: "Login failed",
-          description: errorData.detail || "Invalid username or password",
-          variant: "destructive",
-        });
-        console.error("Login API returned non-OK status:", response.status, errorData);
-        return null;
-      }
+      const data = await response.json();
 
-      const responseJson = await response.json(); 
-      console.log("Login successful full response data from backend:", responseJson); 
-
-      const userData: User = responseJson.user; // CRITICAL: Extract nested 'user'
-
-      if (userData && userData.id !== undefined && userData.username && userData.role && typeof userData.is_active === 'boolean') {
-        setUser(userData);
+      if (response.ok) {
+        const loggedInUser: User = data.user;
+        setUser(loggedInUser);
         setIsAuthenticated(true);
-        localStorage.setItem(AUTH_LOCAL_STORAGE_KEY, JSON.stringify(userData));
-
+        localStorage.setItem(AUTH_LOCAL_STORAGE_KEY, JSON.stringify(loggedInUser));
         toast({
-          title: "Login successful",
-          description: `Welcome back, ${userData.name || userData.username}`, 
-          variant: "default", 
+          title: "Login Successful",
+          description: `Welcome, ${loggedInUser.name}!`,
         });
-
-        return userData;
+        navigate('/dashboard'); // Navigate to dashboard after successful login
+        return loggedInUser;
       } else {
         toast({
-          title: "Login failed",
-          description: "Invalid user data received from server. Missing ID, username, role, or active status.",
+          title: "Login Failed",
+          description: data.detail || "Invalid username or password.",
           variant: "destructive",
         });
-        console.error("Login: Invalid user data structure after successful fetch and parsing:", userData);
+        setUser(null);
+        setIsAuthenticated(false);
+        localStorage.removeItem(AUTH_LOCAL_STORAGE_KEY);
         return null;
       }
-
     } catch (error) {
-      console.error('Login fetch error:', error);
+      console.error('Login request failed:', error);
       toast({
         title: "Login failed",
         description: "Unable to connect to the server or unexpected network error.",
         variant: "destructive",
       });
       return null;
+    } finally {
+      setIsLoading(false); // Ensure isLoading is set to false after attempt
     }
   };
 
   const logout = async () => {
+    setIsLoading(true); // Set loading to true during logout
     try {
         console.log("Attempting logout...");
         const response = await fetch(`${API_BASE_URL}/logout`, {
             method: 'POST',
-            credentials: 'include', 
+            credentials: 'include', // <--- IMPORTANT: Include cookies with the request
         });
         if (!response.ok) {
             console.error("Logout failed on server:", await response.json());
@@ -156,6 +165,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         }
     } catch (error) {
         console.error("Error during logout request:", error);
+        toast({
+            title: "Network Error",
+            description: "An error occurred during logout. Please try again.",
+            variant: "destructive",
+        });
     } finally {
         setUser(null);
         setIsAuthenticated(false);
@@ -166,6 +180,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             variant: "default", 
         });
         navigate('/login');
+        setIsLoading(false); // Set loading to false after logout
     }
   };
 

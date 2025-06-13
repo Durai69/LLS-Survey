@@ -1,23 +1,40 @@
-
+import React, { useMemo } from 'react'; // Added useMemo
 import MainLayout from '@/components/MainLayout/MainLayout';
 import { useAuth } from '@/contexts/AuthContext';
-import { useSurvey } from '@/contexts/SurveyContext';
+import { useSurvey } from '@/contexts/SurveyContext'; // Use useSurvey to get surveys and userSubmissions
 import { Progress } from '@/components/ui/progress';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
-import { useNavigate } from 'react-router-dom'; // Import useNavigate
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
+// No need for useToast or axios import for this minimal fix
 
 const Dashboard = () => {
   const { user } = useAuth();
-  const { getSurveyProgress, surveySubmissions } = useSurvey();
-  const navigate = useNavigate(); // Initialize useNavigate hook
+  // Destructure surveys and userSubmissions directly from useSurvey()
+  const { surveys, userSubmissions, isLoadingSurveys } = useSurvey(); 
+  const navigate = useNavigate();
 
-  // This should now correctly call the function from SurveyContext
-  const progress = getSurveyProgress();
+  // --- LOCAL IMPLEMENTATION OF getSurveyProgress ---
+  // This calculates progress based on available survey templates and user's completed submissions.
+  const getSurveyProgress = useMemo(() => {
+    if (isLoadingSurveys) {
+      return { completed: 0, total: 0 };
+    }
+
+    // For simplicity, total surveys are assumed to be all available survey templates.
+    // In a real application, this "total" should likely come from a backend endpoint
+    // that lists surveys *eligible* for the current user to take, based on permissions.
+    const total = surveys.length; // Count all survey templates as potential surveys to take
+    const completed = userSubmissions.length; // Count the number of surveys the user has submitted
+
+    return { completed, total };
+  }, [surveys, userSubmissions, isLoadingSurveys]);
+
+  const progress = getSurveyProgress; // Now it's a direct object from the useMemo
   const progressPercentage = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
 
-  // Calculate department ratings for the chart (still dummy data for now)
+  // --- DUMMY DATA FOR DEPARTMENT RATINGS (AS REQUESTED TO KEEP IT AS IS) ---
   const departmentRatings = [
     { name: 'IT', rating: 85 },
     { name: 'HR', rating: 90 },
@@ -29,14 +46,21 @@ const Dashboard = () => {
 
   const handleBarClick = (data: any) => {
     if (data.rating < 80) {
-      // Navigate to the remarks/response page for the specific department
-      // You'll need to figure out how to map the department name to a survey ID or department ID
-      // For now, let's just navigate to the general remarks-response page.
-      // In a real app, you might pass `data.name` or an ID as a state or URL param.
       console.log(`Clicked on ${data.name} with low rating: ${data.rating}`);
-      navigate('/remarks-response'); // Navigate to the remarks/response page
+      navigate('/remarks-response');
     }
   };
+
+  // Add loading state for the dashboard itself, using the loading states from contexts
+  if (isLoadingSurveys) {
+    return (
+      <MainLayout title="Dashboard">
+        <div className="flex justify-center items-center h-screen text-lg">
+          <p>Loading dashboard data...</p>
+        </div>
+      </MainLayout>
+    );
+  }
 
   return (
     <MainLayout title="Dashboard">
@@ -46,7 +70,7 @@ const Dashboard = () => {
         </h2>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {/* Survey Overview Card */}
+          {/* Department Performance Overview Card */}
           <Card className="col-span-1 lg:col-span-2 shadow-lg">
             <CardHeader>
               <CardTitle className="text-lg font-semibold text-gray-700">Department Performance Overview</CardTitle>
@@ -63,7 +87,7 @@ const Dashboard = () => {
                       {departmentRatings.map((entry, index) => (
                         <Cell 
                           key={`cell-${index}`} 
-                          fill={entry.rating < 80 ? '#FF6B6B' : '#e5e7ff'} // Red for low rating, default for others
+                          fill={entry.rating < 80 ? '#FF6B6B' : '#e5e7ff'} 
                           stroke={entry.rating >= 80 ? '#9b87f5' : '#FF6B6B'} 
                           strokeWidth={1}
                         />
@@ -73,7 +97,7 @@ const Dashboard = () => {
                 </ResponsiveContainer>
               </div>
               <div className="text-sm text-muted-foreground mt-2">
-                *Click on Red Graph to view the remarks / improvement suggestions
+                *Click on Red Bar to view the remarks / improvement suggestions
               </div>
             </CardContent>
           </Card>

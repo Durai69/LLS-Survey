@@ -1,14 +1,17 @@
-// Assuming your SurveyContext.tsx looks something like this.
-// You need to ensure all Axios instances or fetch calls in it send cookies.
-
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import axios from 'axios';
-import { useAuth } from '@/contexts/AuthContext'; // Assuming you use useAuth to check auth status
+import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/components/ui/use-toast';
 
-const API_BASE_URL = 'http://127.0.0.1:5000';
+// IMPORTANT: WITH /api prefix here, as these routes are part of a blueprint
+const API_BASE_URL = 'http://127.0.0.1:5000/api'; 
 
-// Define your interfaces
+// Configure Axios instance to always send cookies
+const axiosInstance = axios.create({
+  baseURL: API_BASE_URL,
+  withCredentials: true,
+});
+
 export interface QuestionData {
   id: number;
   text: string;
@@ -23,109 +26,152 @@ export interface SurveyData {
   title: string;
   description: string;
   created_at: string;
-  rated_dept_name: string; // The name of the department being rated
-  managing_dept_name: string; // The name of the department managing this survey
+  rated_dept_name: string;
+  managing_dept_name: string;
   rated_department_id: number;
   managing_department_id: number;
   questions: QuestionData[];
 }
 
+export interface UserSubmission {
+  id: number;
+  survey_id: number;
+  submitter_user_id: number;
+  submitter_department_id: number;
+  rated_department_id: number;
+  submitted_at: string;
+  overall_customer_rating: number;
+  suggestions: string | null;
+  submitter_department_name: string;
+  rated_department_name: string;
+}
+
+interface OverallStats {
+  totalSurveysSubmitted: number;
+  averageOverallRating: number;
+  latestSubmissions: {
+    responseId: number;
+    surveyTitle: string;
+    ratedDepartmentName: string;
+    overallRating: number;
+    submittedBy: string;
+    submittedAt: string;
+  }[];
+}
+
+interface DepartmentMetric {
+  department_id: number;
+  department_name: string;
+  average_rating: number;
+  total_surveys: number;
+}
+
 interface SurveyContextType {
   surveys: SurveyData[];
+  currentSurvey: SurveyData | null;
+  userSubmissions: UserSubmission[];
+  overallStats: OverallStats | null;
+  departmentMetrics: DepartmentMetric[];
   fetchSurveys: () => Promise<void>;
   fetchSurveyById: (id: number) => Promise<SurveyData | null>;
-  submitSurveyResponse: (surveyId: number, answers: any[], overallData: { overall_customer_rating?: number; rating_description?: string; suggestion?: string }) => Promise<boolean>;
-  // Add other survey-related functions here (e.g., fetch remarks)
+  fetchUserSubmissions: () => Promise<void>;
+  fetchOverallDashboardStats: () => Promise<void>;
+  fetchDepartmentDashboardMetrics: () => Promise<void>;
+  submitSurveyResponse: (payload: any) => Promise<boolean>;
   isLoadingSurveys: boolean;
+  isLoadingSurveyForm: boolean;
   error: string | null;
 }
 
 const SurveyContext = createContext<SurveyContextType | undefined>(undefined);
 
-export const SurveyProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [surveys, setSurveys] = useState<SurveyData[]>([]);
-  const [isLoadingSurveys, setIsLoadingSurveys] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const { isAuthenticated, isLoading: isAuthLoading } = useAuth(); // Get isAuthenticated and isLoading from AuthContext
+export const SurveyProvider = ({ children }: { children: ReactNode }) => {
+  const { isAuthenticated, isLoading: isAuthLoading } = useAuth();
   const { toast } = useToast();
 
-  // Configure Axios to send cookies with every request from this context
-  axios.defaults.withCredentials = true;
+  const [surveys, setSurveys] = useState<SurveyData[]>([]);
+  const [currentSurvey, setCurrentSurvey] = useState<SurveyData | null>(null);
+  const [userSubmissions, setUserSubmissions] = useState<UserSubmission[]>([]);
+  const [overallStats, setOverallStats] = useState<OverallStats | null>(null);
+  const [departmentMetrics, setDepartmentMetrics] = useState<DepartmentMetric[]>([]);
 
-  const fetchSurveys = async () => {
-    if (!isAuthenticated) {
-      console.log("Not authenticated, skipping fetchSurveys.");
-      setIsLoadingSurveys(false); // Stop loading if not authenticated
-      setError("Authentication required to fetch surveys.");
-      return;
-    }
+  const [isLoadingSurveys, setIsLoadingSurveys] = useState(true);
+  const [isLoadingSurveyForm, setIsLoadingSurveyForm] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
+  const fetchSurveys = useCallback(async () => {
     setIsLoadingSurveys(true);
     setError(null);
     try {
-      const response = await axios.get<SurveyData[]>(`${API_BASE_URL}/api/surveys`);
+      const response = await axiosInstance.get<SurveyData[]>('/surveys'); 
       setSurveys(response.data);
     } catch (err: any) {
-      console.error('Failed to fetch departments (surveys) in SurveyContext:', err);
-      setError(err.response?.data?.detail || 'Failed to load surveys.');
-      toast({
-        title: "Error fetching surveys",
-        description: err.response?.data?.detail || 'Failed to load surveys.',
-        variant: "destructive",
-      });
+      console.error("Failed to fetch surveys:", err);
+      setError(err.response?.data?.detail || "Failed to load surveys.");
     } finally {
       setIsLoadingSurveys(false);
     }
-  };
+  }, []);
 
-  const fetchSurveyById = async (id: number): Promise<SurveyData | null> => {
-    if (!isAuthenticated) {
-      console.log("Not authenticated, skipping fetchSurveyById.");
-      setError("Authentication required to fetch survey details.");
-      return null;
-    }
-
-    setIsLoadingSurveys(true); // Re-use this loading state for simplicity or create a specific one
+  const fetchSurveyById = useCallback(async (id: number): Promise<SurveyData | null> => {
+    setIsLoadingSurveyForm(true);
     setError(null);
     try {
-      const response = await axios.get<SurveyData>(`${API_BASE_URL}/api/surveys/${id}`);
+      const response = await axiosInstance.get<SurveyData>(`/surveys/${id}`);
+      setCurrentSurvey(response.data);
       return response.data;
     } catch (err: any) {
-      console.error('Failed to fetch survey details:', err);
-      setError(err.response?.data?.detail || 'Failed to load survey details.');
-      toast({
-        title: "Error fetching survey",
-        description: err.response?.data?.detail || 'Failed to load survey details.',
-        variant: "destructive",
-      });
+      console.error(`Failed to fetch survey with ID ${id}:`, err);
+      setError(err.response?.data?.detail || `Failed to load survey with ID ${id}.`);
+      setCurrentSurvey(null);
       return null;
+    } finally {
+      setIsLoadingSurveyForm(false);
+    }
+  }, []);
+
+  const fetchUserSubmissions = useCallback(async () => {
+    setIsLoadingSurveys(true); 
+    setError(null);
+    try {
+      const response = await axiosInstance.get<UserSubmission[]>('/user-submissions');
+      setUserSubmissions(response.data);
+    } catch (err: any) {
+      console.error("Failed to fetch user submissions:", err);
+      setError(err.response?.data?.detail || "Failed to load your past surveys.");
     } finally {
       setIsLoadingSurveys(false);
     }
-  };
+  }, []);
 
-  const submitSurveyResponse = async (surveyId: number, answers: any[], overallData: { overall_customer_rating?: number; rating_description?: string; suggestion?: string }): Promise<boolean> => {
-    if (!isAuthenticated) {
-      toast({
-        title: "Authentication Required",
-        description: "Please log in to submit a survey.",
-        variant: "destructive",
-      });
-      return false;
-    }
-    
+  const fetchOverallDashboardStats = useCallback(async () => {
     try {
-      const payload = {
-        answers: answers,
-        overall_customer_rating: overallData.overall_customer_rating,
-        rating_description: overallData.rating_description,
-        suggestion: overallData.suggestion
-      };
-      const response = await axios.post(`${API_BASE_URL}/api/surveys/${surveyId}/submit_response`, payload);
+      const response = await axiosInstance.get<OverallStats>('/dashboard/overall-stats');
+      setOverallStats(response.data);
+    } catch (err: any) {
+      console.error("Failed to fetch overall dashboard stats:", err);
+    }
+  }, []);
+
+  const fetchDepartmentDashboardMetrics = useCallback(async () => {
+    try {
+      const response = await axiosInstance.get<DepartmentMetric[]>('/dashboard/department-metrics');
+      setDepartmentMetrics(response.data);
+    } catch (err: any) {
+      console.error("Failed to fetch department dashboard metrics:", err);
+    }
+  }, []);
+
+  const submitSurveyResponse = async (payload: any): Promise<boolean> => {
+    try {
+      const response = await axiosInstance.post('/submit-survey', payload);
       toast({
         title: "Survey Submitted",
         description: (response.data as { message?: string })?.message || "Your survey has been submitted successfully!",
       });
+      fetchUserSubmissions(); 
+      fetchOverallDashboardStats();
+      fetchDepartmentDashboardMetrics();
       return true;
     } catch (err: any) {
       console.error('Failed to submit survey response:', err);
@@ -138,22 +184,33 @@ export const SurveyProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
   };
 
-
-  // Effect to fetch surveys only when authenticated and auth state is ready
   useEffect(() => {
-    // Only fetch if authentication check is complete and user is authenticated
     if (!isAuthLoading && isAuthenticated) {
-      fetchSurveys();
+      fetchSurveys(); 
+      fetchUserSubmissions();
     } else if (!isAuthLoading && !isAuthenticated) {
-      // If auth check is complete and not authenticated, set loading to false
       setIsLoadingSurveys(false);
-      setError("Not authenticated.");
     }
-  }, [isAuthenticated, isAuthLoading]); // Dependencies: run when these change
+  }, [isAuthenticated, isAuthLoading, fetchSurveys, fetchUserSubmissions]);
 
 
   return (
-    <SurveyContext.Provider value={{ surveys, fetchSurveys, fetchSurveyById, submitSurveyResponse, isLoadingSurveys, error }}>
+    <SurveyContext.Provider value={{ 
+        surveys, 
+        currentSurvey, 
+        userSubmissions, 
+        overallStats, 
+        departmentMetrics, 
+        fetchSurveys, 
+        fetchSurveyById, 
+        fetchUserSubmissions, 
+        fetchOverallDashboardStats, 
+        fetchDepartmentDashboardMetrics, 
+        submitSurveyResponse, 
+        isLoadingSurveys, 
+        isLoadingSurveyForm,
+        error 
+    }}>
       {children}
     </SurveyContext.Provider>
   );
