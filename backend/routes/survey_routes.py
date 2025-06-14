@@ -1,10 +1,8 @@
-# F:\LLS Survey\backend\routes\survey_routes.py
 from flask import Blueprint, request, jsonify, abort, send_file
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, desc, cast, String
+from sqlalchemy import func, desc
 from database import SessionLocal
-# Corrected import line - Removed 'Response' as it's no longer used/defined in current models
-from models import Survey, Question, Option, Answer, User, Department, RemarkResponse, SurveySubmission 
+from models import Survey, Question, Option, Answer, User, Department, RemarkResponse, SurveySubmission, Permission
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy.exc import IntegrityError, NoResultFound
 from datetime import datetime, timedelta
@@ -13,7 +11,8 @@ import io
 
 survey_bp = Blueprint('survey', __name__, url_prefix='/api')
 
-# Helper function to determine rating description based on percentage
+# --- Helper Functions ---
+
 def get_rating_description(overall_rating: float) -> str:
     if overall_rating >= 91:
         return "Excellent - Exceeds the Customer Expectation"
@@ -24,12 +23,7 @@ def get_rating_description(overall_rating: float) -> str:
     else:
         return "Poor - Identify areas for improvement and initiate action to eliminate dissatisfaction"
 
-# Helper function for filtering submissions by time period for exports/summaries
 def filter_submissions_by_time_period_sql(db: Session, time_period: str, base_query):
-    """
-    Applies date filtering to a base SQLAlchemy query.
-    `base_query` should typically be a query on the `SurveySubmission` model.
-    """
     query = base_query
     current_date = datetime.utcnow()
 
@@ -49,16 +43,12 @@ def filter_submissions_by_time_period_sql(db: Session, time_period: str, base_qu
         start_date = current_date - timedelta(days=365)
         query = query.filter(SurveySubmission.submitted_at >= start_date)
     elif time_period == 'all_time' or not time_period:
-        pass # No date filter needed
+        pass
     else:
         print(f"Warning: Invalid time period '{time_period}' received for filtering.")
-        # Return an empty query if time_period is invalid or no filter needed
         return base_query.filter(False) if time_period else base_query
-
     return query
 
-
-# Helper function to get DB session
 def get_db():
     db = SessionLocal()
     try:
@@ -66,294 +56,214 @@ def get_db():
     finally:
         db.close()
 
+# --- Surveyable Departments for User ---
 
-# --- Survey Management (CRUD for Surveys/Questions, typically Admin-side) ---
-
-# Endpoint to create a new survey (Admin)
-@survey_bp.route('/surveys', methods=['POST'])
-@jwt_required() # Protect this endpoint if only admins can create surveys
-def create_survey():
-    db: Session = next(get_db())
-    data = request.get_json()
-
-    if not all([key in data for key in ['title', 'description', 'managing_department_id', 'rated_department_id', 'questions']]):
-        return jsonify({"detail": "Missing required survey fields"}), 400
-
+@survey_bp.route('/surveyable-departments', methods=['GET'])
+@jwt_required()
+def get_surveyable_departments():
+    db: Session = SessionLocal()
     try:
-        new_survey = Survey(
-            title=data['title'],
-            description=data.get('description'),
-            managing_department_id=data['managing_department_id'],
-            rated_department_id=data['rated_department_id']
-        )
-        db.add(new_survey)
-        db.commit()
-        db.refresh(new_survey)
+        username = get_jwt_identity()
+        user = db.query(User).filter(User.username == username).first()
+        if not user:
+            return jsonify({"detail": "User not found."}), 404
+        user_dept = db.query(Department).filter(Department.name == user.department).first()
+        if not user_dept:
+            return jsonify({"detail": "User's department not found."}), 404
 
-        for q_data in data['questions']:
-            new_question = Question(
-                survey_id=new_survey.id,
-                category=q_data.get('category'),
-                text=q_data['text'],
-                type=q_data.get('type', 'rating'),
-                order=q_data.get('order', 0)
-            )
-            db.add(new_question)
-            db.commit()
-            db.refresh(new_question)
+        now = datetime.utcnow()
+        perms = db.query(Permission).filter(
+            Permission.from_dept_id == user_dept.id,
+            Permission.start_date <= now,
+            Permission.end_date >= now
+        ).all()
 
-            if new_question.type == 'multiple_choice' and 'options' in q_data:
-                for opt_data in q_data['options']:
-                    new_option = Option(
-                        question_id=new_question.id,
-                        text=opt_data['text'],
-                        value=opt_data.get('value')
-                    )
-                    db.add(new_option)
-        db.commit()
-
-        return jsonify({"message": "Survey created successfully", "survey_id": new_survey.id}), 201
-    except IntegrityError as e:
-        db.rollback()
-        print(f"Database integrity error creating survey: {e}")
-        return jsonify({"detail": "Error creating survey due to existing data or foreign key issue."}), 500
-    except Exception as e:
-        db.rollback()
-        print(f"Error creating survey: {e}")
-        return jsonify({"detail": f"An unexpected error occurred: {str(e)}"}), 500
+        result = []
+        for perm in perms:
+            if (perm.from_dept_id == perm.to_dept_id and not getattr(perm, "can_survey_self", False)):
+                continue
+            dept = db.query(Department).filter(Department.id == perm.to_dept_id).first()
+            if dept:
+                result.append({"id": dept.id, "name": dept.name})
+        return jsonify(result), 200
     finally:
         db.close()
 
-# Endpoint to fetch a specific survey by ID (for display or editing)
-@survey_bp.route('/surveys/<int:survey_id>', methods=['GET'])
-# @jwt_required() # <-- Keep this commented out for now for easier frontend development
-def get_survey_template_by_id(survey_id: int):
-    db: Session = next(get_db())
-    survey = db.query(Survey).options(
-        joinedload(Survey.questions).joinedload(Question.options),
-        joinedload(Survey.managing_department), # Eager load related departments
-        joinedload(Survey.rated_department)
-    ).filter(Survey.id == survey_id).first()
+# --- Get All Surveys (for user selection) ---
 
-    if not survey:
-        abort(404, description="Survey not found")
-
-    survey_data = {
-        "id": survey.id,
-        "title": survey.title,
-        "description": survey.description,
-        "created_at": survey.created_at.isoformat() if survey.created_at else None,
-        "managing_department_id": survey.managing_department_id,
-        "rated_department_id": survey.rated_department_id,
-        "managing_dept_name": survey.managing_department.name if survey.managing_department else "N/A",
-        "rated_dept_name": survey.rated_department.name if survey.rated_department else "N/A",
-        "questions": []
-    }
-
-    questions_data = []
-    for question in survey.questions:
-        q_data = {
-            "id": question.id,
-            "text": question.text,
-            "type": question.type,
-            "order": question.order,
-            "category": question.category,
-            "options": []
-        }
-        if question.type == 'multiple_choice':
-            for option in question.options:
-                q_data['options'].append({
-                    "id": option.id,
-                    "text": option.text,
-                    "value": option.value
-                })
-        questions_data.append(q_data)
-    
-    # Sort questions by order for consistent display
-    survey_data['questions'] = sorted(questions_data, key=lambda q: q['order'])
-
-    return jsonify(survey_data), 200
-
-# Endpoint to get all survey templates (for general overview, e.g., in admin list of surveys)
 @survey_bp.route('/surveys', methods=['GET'])
 @jwt_required()
-def get_all_surveys():
-    db = SessionLocal()
+def get_surveys():
+    db: Session = SessionLocal()
     try:
-        surveys = db.query(Survey).all()
-        result = []
-        for s in surveys:
-            result.append({
+        surveys = db.query(Survey).options(
+            joinedload(Survey.rated_department),
+            joinedload(Survey.managing_department)
+        ).all()
+        return jsonify([
+            {
                 "id": s.id,
                 "title": s.title,
                 "description": s.description,
-                "created_at": str(s.created_at),
-                "rated_dept_name": s.rated_department.name,
-                "managing_dept_name": s.managing_department.name,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
                 "rated_department_id": s.rated_department_id,
+                "rated_dept_name": s.rated_department.name if s.rated_department else None,
                 "managing_department_id": s.managing_department_id,
-                "questions": [
-                    {
-                        "id": q.id,
-                        "text": q.text,
-                        "type": q.type,
-                        "order": q.order,
-                        "category": q.category,
-                        "options": [
-                            {"id": o.id, "text": o.text, "value": o.value} for o in q.options
-                        ] if q.options else []
-                    } for q in s.questions
-                ]
-            })
-        return jsonify(result), 200
-    except Exception as e:
-        print(f"Error fetching surveys: {e}")
-        return jsonify({"detail": "Failed to fetch surveys."}), 500
+                "managing_dept_name": s.managing_department.name if s.managing_department else None,
+            }
+            for s in surveys
+        ])
     finally:
         db.close()
 
+# --- Get Survey and Questions ---
 
-# Endpoint to submit a survey response (from SurveyForm.tsx)
-@survey_bp.route('/submit-survey', methods=['POST'])
-@jwt_required() # User must be logged in to submit
-def submit_survey_response():
-    db: Session = next(get_db())
-    data = request.get_json()
-
-    current_username = get_jwt_identity()
-    submitter_user = db.query(User).filter(User.username == current_username).first()
-
-    if not submitter_user:
-        return jsonify({"detail": "Authenticated user not found in database."}), 404
-
-    # Validate incoming payload structure
-    required_fields = [
-        'survey_id', 'department_id', 'submitter_department_id',
-        'questions_data', 'summary_metrics'
-    ]
-    for field in required_fields:
-        if field not in data:
-            return jsonify({"error": f"Missing required field in payload: {field}"}), 400
-
-    survey_template_id = data['survey_id']
-    rated_department_id = data['department_id']
-    submitter_department_id = data['submitter_department_id']
-    questions_data = data['questions_data']
-    summary_metrics = data['summary_metrics']
-    final_suggestion = summary_metrics.get('suggestions')
-
-    # Basic validation of summary_metrics
-    if not isinstance(summary_metrics.get('overall_customer_rating'), (int, float)):
-        return jsonify({"error": "summary_metrics.overall_customer_rating is required and must be a number."}), 400
-
-    try:
-        # Verify survey template exists
-        survey_template = db.query(Survey).filter(
-            Survey.id == survey_template_id,
-            Survey.rated_department_id == rated_department_id
-        ).first()
-        if not survey_template:
-            return jsonify({"detail": "Survey template not found for the specified rated department."}), 404
-
-        # Check for duplicate submission by this user for this survey template
-        existing_submission = db.query(SurveySubmission).filter(
-            SurveySubmission.survey_id == survey_template_id,
-            SurveySubmission.submitter_user_id == submitter_user.id
-        ).first()
-        if existing_submission:
-            return jsonify({"detail": "You have already submitted this survey."}), 409
-
-        # Create new SurveySubmission
-        new_submission = SurveySubmission(
-            survey_id=survey_template_id,
-            submitter_user_id=submitter_user.id,
-            submitter_department_id=submitter_department_id,
-            rated_department_id=rated_department_id,
-            submitted_at=datetime.utcnow(),
-            overall_customer_rating=summary_metrics['overall_customer_rating'],
-            rating_description=summary_metrics.get('rating_description'),
-            suggestions=final_suggestion,
-        )
-        db.add(new_submission)
-        db.flush() # Flush to get new_submission.id before processing answers
-
-        # Process individual answers
-        for ans_data in questions_data:
-            question_id = ans_data.get('id')
-            
-            # Verify question exists and belongs to the survey template
-            question_obj = db.query(Question).filter(
-                Question.id == question_id,
-                Question.survey_id == survey_template_id
-            ).first()
-            
-            if not question_obj:
-                print(f"Warning: Question ID {question_id} not found for survey {survey_template_id}. Skipping answer.")
-                continue
-
-            new_answer = Answer(
-                submission_id=new_submission.id,
-                question_id=question_id,
-                rating_value=ans_data.get('rating'),
-                text_response=ans_data.get('remarks'),
-                # selected_option_id=ans_data.get('selected_option_id') # Add if you have multiple choice questions
-            )
-            db.add(new_answer)
-        
-        db.commit()
-        return jsonify({"message": "Survey submitted successfully", "submission_id": new_submission.id}), 201
-
-    except IntegrityError as e:
-        db.rollback()
-        print(f"IntegrityError during survey submission: {e}")
-        return jsonify({"detail": "Database integrity error. Possible duplicate submission or invalid data."}), 400
-    except NoResultFound:
-        db.rollback()
-        return jsonify({"detail": "Required data (user/department/survey template) not found in database for submission."}), 400
-    except Exception as e:
-        db.rollback()
-        print(f"Error submitting survey: {e}")
-        return jsonify({"detail": f"An unexpected error occurred during submission: {str(e)}"}), 500
-    finally:
-        db.close()
-
-
-# NEW ENDPOINT: Get surveys submitted by the current user (for DepartmentSelection.tsx)
-@survey_bp.route('/user-submissions', methods=['GET'])
+@survey_bp.route('/surveys/<int:survey_id>', methods=['GET'])
 @jwt_required()
-def get_user_submissions():
+def get_survey_by_id(survey_id):
     db: Session = SessionLocal()
     try:
-        current_username = get_jwt_identity()
-        user = db.query(User).filter_by(username=current_username).first()
+        survey = db.query(Survey).options(
+            joinedload(Survey.questions).joinedload(Question.options),
+            joinedload(Survey.managing_department),
+            joinedload(Survey.rated_department)
+        ).filter(Survey.id == survey_id).first()
+        if not survey:
+            return jsonify({"detail": "Survey not found"}), 404
 
-        if not user:
-            return jsonify({"detail": "User not found"}), 404
+        questions_data = []
+        for question in survey.questions:
+            q_data = {
+                "id": question.id,
+                "text": question.text,
+                "type": question.type,
+                "order": question.order,
+                "category": question.category,
+                "options": [
+                    {"id": opt.id, "text": opt.text, "value": opt.value}
+                    for opt in question.options
+                ] if question.type == "multiple_choice" else []
+            }
+            questions_data.append(q_data)
 
-        submissions = db.query(SurveySubmission).filter_by(submitter_user_id=user.id).all()
-
-        result = []
-        for s in submissions:
-            result.append({
-                "id": s.id,
-                "survey_id": s.survey_id,
-                "submitter_user_id": s.submitter_user_id,
-                "submitter_department_id": s.submitter_department_id,
-                "rated_department_id": s.rated_department_id,
-                "submitted_at": str(s.submitted_at),
-                "overall_customer_rating": s.overall_customer_rating,
-                "suggestions": s.suggestions,
-                "submitter_department_name": s.submitter_department.name,
-                "rated_department_name": s.rated_department.name
-            })
-
-        return jsonify(result), 200
-    except Exception as e:
-        print(f"Error fetching user submissions: {e}")
-        return jsonify({"detail": "Failed to fetch user submissions."}), 500
+        survey_data = {
+            "id": survey.id,
+            "title": survey.title,
+            "description": survey.description,
+            "created_at": survey.created_at.isoformat() if survey.created_at else None,
+            "managing_department_id": survey.managing_department_id,
+            "rated_department_id": survey.rated_department_id,
+            "managing_dept_name": survey.managing_department.name if survey.managing_department else None,
+            "rated_dept_name": survey.rated_department.name if survey.rated_department else None,
+            "questions": sorted(questions_data, key=lambda q: q['order']),
+        }
+        return jsonify(survey_data), 200
     finally:
         db.close()
 
+# --- Submit Survey Response with Strict Validation ---
+
+@survey_bp.route('/surveys/<int:survey_id>/submit_response', methods=['POST'])
+@jwt_required()
+def submit_survey_response(survey_id):
+    db: Session = SessionLocal()
+    try:
+        data = request.get_json()
+        username = get_jwt_identity()
+        user = db.query(User).filter(User.username == username).first()
+        if not user:
+            return jsonify({"detail": "User not found"}), 404
+        user_dept = db.query(Department).filter(Department.name == user.department).first()
+        if not user_dept:
+            return jsonify({"detail": "User's department not found."}), 404
+
+        survey = db.query(Survey).filter(Survey.id == survey_id).first()
+        if not survey:
+            return jsonify({"detail": "Survey not found."}), 404
+
+        if user_dept.id == survey.rated_department_id:
+            return jsonify({"detail": "You cannot rate your own department."}), 403
+
+        prev = db.query(SurveySubmission).filter(
+            SurveySubmission.survey_id == survey_id,
+            SurveySubmission.submitter_user_id == user.id
+        ).first()
+        if prev:
+            return jsonify({"detail": "You have already submitted this survey."}), 409
+
+        answers = data.get('answers', [])
+        suggestion = data.get('suggestion', '')
+
+        questions = db.query(Question).filter(Question.survey_id == survey_id).all()
+        question_ids = {q.id for q in questions}
+        if len(answers) != len(questions):
+            return jsonify({"detail": "All questions must be answered."}), 400
+
+        for answer in answers:
+            qid = answer.get('id')
+            rating = answer.get('rating')
+            remarks = answer.get('remarks', '')
+            if qid not in question_ids:
+                return jsonify({"detail": f"Invalid question ID: {qid}"}), 400
+            if type(rating) is not int or rating not in [1, 2, 3, 4]:
+                return jsonify({"detail": f"Invalid rating for question {qid}: {rating}. Must be integer 1, 2, 3, or 4."}), 400
+            if rating in [1, 2] and not remarks.strip():
+                return jsonify({"detail": f"Remarks required for low rating (1 or 2) for question {qid}."}), 400
+
+        submission = SurveySubmission(
+            survey_id=survey.id,
+            submitter_user_id=user.id,
+            submitter_department_id=user_dept.id,
+            rated_department_id=survey.rated_department_id,
+            suggestions=suggestion,
+            submitted_at=datetime.utcnow()
+        )
+        db.add(submission)
+        db.flush()
+
+        for answer in answers:
+            db.add(Answer(
+                submission_id=submission.id,
+                question_id=answer['id'],
+                rating_value=answer['rating'],
+                text_response=answer.get('remarks', '')
+            ))
+
+        db.commit()
+        return jsonify({"message": "Survey submitted successfully!"}), 201
+    except IntegrityError:
+        db.rollback()
+        return jsonify({"detail": "Duplicate submission or database error."}), 400
+    except Exception as e:
+        db.rollback()
+        return jsonify({"detail": f"Error: {str(e)}"}), 500
+    finally:
+        db.close()
+
+# --- Get User's Completed Survey Submissions ---
+
+@survey_bp.route('/survey_submissions', methods=['GET'])
+@jwt_required()
+def get_user_survey_submissions():
+    db: Session = SessionLocal()
+    try:
+        username = get_jwt_identity()
+        user = db.query(User).filter(User.username == username).first()
+        if not user:
+            return jsonify({"detail": "User not found"}), 404
+        submissions = db.query(SurveySubmission).filter(
+            SurveySubmission.submitter_user_id == user.id
+        ).all()
+        return jsonify([
+            {
+                "id": s.id,
+                "survey_id": s.survey_id,
+                "rated_department_id": s.rated_department_id,
+                "submitted_at": s.submitted_at.isoformat() if s.submitted_at else None
+            } for s in submissions
+        ])
+    finally:
+        db.close()
 
 
 # --- Remarks & Responses Management ---

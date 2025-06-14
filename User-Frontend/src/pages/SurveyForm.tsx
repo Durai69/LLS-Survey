@@ -22,15 +22,14 @@ const SurveyForm = () => {
     // If your URL is /survey/2, then departmentId is '2'. If it's a survey ID, rename it.
     // Let's assume `departmentId` is actually the `surveyId` for now, or update your routing.
     const { departmentId: surveyId } = useParams<{ departmentId: string }>(); // Rename departmentId to surveyId
-    const { currentSurvey, loadingSurvey, error, fetchSurveyById, submitSurveyResponse, departments } = useSurvey();
+    const { currentSurvey, loading, error, fetchSurveyById, submitSurveyResponse } = useSurvey();
     const navigate = useNavigate();
     const { toast } = useToast();
     
     const [answers, setAnswers] = useState<QuestionAnswer[]>([]);
     const [finalSuggestion, setFinalSuggestion] = useState('');
     
-    // Find department if needed, but the survey itself might define who it's for
-    const department = departments.find(d => d.id === parseInt(surveyId || '0')); // Assuming departmentId is numeric
+    // The survey itself might define who it's for; department lookup removed as departments is not available
 
     useEffect(() => {
         if (surveyId) {
@@ -122,7 +121,7 @@ const SurveyForm = () => {
         // Toast is handled by SurveyContext now
     };
 
-    if (loadingSurvey) {
+    if (loading) {
         return <MainLayout><div className="px-6 max-w-4xl mx-auto text-center py-10">Loading Survey...</div></MainLayout>;
     }
 
